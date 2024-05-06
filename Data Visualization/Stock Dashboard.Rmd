@@ -1,0 +1,276 @@
+---
+title: "Stocks Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+runtime: shiny
+
+---
+
+```{r global, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(plotly)
+library(quantmod)
+library(DT)
+library(viridis)
+library(tidyr)
+library(tibble)
+library(readr)
+library(zoo) 
+library(scales) 
+library(formattable)
+
+# Read data
+stocks_data <- read.csv("Stocks.csv")
+stocks_data$Date <- as.Date(stocks_data$Date, format="%m/%d/%Y")
+cap <- readr::read_csv("MarketCap.csv")
+financials <- read.csv("financials.csv")
+
+# Define custom color palette
+custom_palette <- c("#211C6A", "#59B4C3", "#74E291", "#EFF396")
+# custom_palette <- c("#008DDA","#41C9E2","#00B2A9","#7DD0B6","#4D9195","#007A87")
+
+
+unique_years <- sort(unique(format(stocks_data$Date, "%Y")))
+head(stocks_data)
+
+```
+
+
+
+```{r}
+ui <- fluidPage(
+  tags$style(
+    HTML(
+      sprintf(
+        "
+        /* Custom panel colors */
+        .custom-panel {
+          background-color: #6420AA !important;
+          color: #FFFFFF; /* Ensuring text within the panel is visible */
+        }
+        
+        /* Existing styles */
+        .custom-inputs {
+          background-color: %s !important;
+          color: #ffff;
+          padding: 5px;
+          border-radius: 5px;
+        }
+        .custom-inputs .input-field {
+          margin-top: 10px;
+        }
+        .custom-inputs .checkbox-inline label {
+          display: inline-block;
+          padding: 6px 12px;
+          margin-bottom: 0;
+          font-size: 14px;
+          line-height: 1;
+          text-align: center;
+          white-space: nowrap;
+          vertical-align: middle;
+          cursor: pointer;
+          background-image: none;
+          border: 1px solid transparent;
+          border-radius: 4px;
+          color: #ffff;
+        }
+        .custom-inputs .checkbox-inline input[type='checkbox'] {
+          margin-left: -20px;
+        }
+        .allign {
+          margin-top:15px;
+          text-allign:cnter;
+        }
+        .table_bg{
+          background-color: %s;
+        }
+        ",
+        custom_palette[1], custom_palette[6] 
+      )
+    )
+  ), 
+  fluidRow(
+    class = "custom-inputs",
+    column(6,
+           selectInput("yearSelect", "Select Year",
+                       choices = c("2020", "2021", "2022", "2023"),
+                       selected = "2022")
+    ), 
+    column(6,
+           checkboxGroupInput("companySelect", "Select Companies",
+                              choices = unique(stocks_data$Company),
+                              selected = unique(stocks_data$Company),
+                              inline = TRUE)
+    )
+  )
+  ,
+  fluidRow(
+    class = "allign",
+    column(6, 
+           plotlyOutput("graph1")
+    ),
+    column(6,
+           div(dataTableOutput("graph5"), style = "margin-bottom: 30px;")
+    )
+  ),
+  fluidRow(
+    column(6, 
+           plotlyOutput("graph3")
+    ),
+    column(6, 
+           plotlyOutput("graph2")
+    )
+  )
+)
+
+
+```
+
+
+
+```{r}
+server <- function(input, output) {
+  output$graph1 <- renderPlotly({
+    # Plotly graph for Closing value with Company name in hover info
+    p_close <- plot_ly(data = filtered_data(), x = ~month, y = ~avg_Close, type = 'scatter', mode = 'lines',
+                       color = ~Company, colors = custom_palette, hoverinfo = "text",
+                       text = ~paste("Company: ", Company, "<br>Month: ", months(month), "<br>Avg Stock Price: ", round(avg_Close, 2)), 
+                       name = ~Company) %>%
+      layout(title = "<b>Average Stock Price & Volume by Month</b>",
+             xaxis = list(title = "", showline = FALSE, tickfont = list(size = 10)),
+             yaxis = list(title = "Stock Price", showline = TRUE, linewidth = 1, tickprefix = "$", tickfont = list(size = 10)),
+             hovermode = "x unified",
+             margin = list(l = 80, r = 80, b = 80, t = 80),
+             showlegend = TRUE)
+    
+    # Plotly graph for Volume with Company name in hover info
+    p_volume <- plot_ly(data = filtered_data(), x = ~month, y = ~avg_Volume, type = 'bar',
+                        color = ~Company, colors = custom_palette, hoverinfo = "text",
+                        text = ~paste("Company: ", Company, "<br>Month: ", months(month), "<br>Avg Volume: ", paste0(round(avg_Volume/1000000, 2), "M")),
+                        showlegend = FALSE) %>%
+      layout(yaxis = list(title = "Volume", showline = TRUE, linewidth = 1, tickprefix = "", tickfont = list(size = 10)),
+             xaxis = list(title = "Month", showline = FALSE, linewidth = 2, tickfont = list(size = 10)),
+             margin = list(l = 80, r = 80, b = 80, t = 80))
+    
+    # Combine the plots with a common x-axis
+    subplot(p_close, p_volume, nrows = 2, shareX = TRUE, titleY = TRUE, heights = c(0.75, 0.25))
+  })
+  
+  # Reactive expression to filter data based on UI inputs
+  filtered_data <- reactive({
+    selected_companies <- input$companySelect
+    
+    if (length(selected_companies) == 0) {
+      # Create an empty data frame with required columns
+      data <- data.frame(Company = character(),
+                         month = as.Date(character()),
+                         avg_Close = numeric(),
+                         avg_Volume = numeric())
+      return(data)
+    }
+    
+    data <- stocks_data %>%
+      filter(format(Date, "%Y") == input$yearSelect,
+             Company %in% selected_companies) %>%
+      mutate(month = as.Date(paste(year(Date), month(Date), "01", sep = "-"))) %>%
+      group_by(Company, month) %>%
+      summarise(avg_Close = mean(Close, na.rm = TRUE),
+                avg_Volume = mean(Volume, na.rm = TRUE))
+    return(data)
+  })
+
+  
+  output$graph2 <- renderPlotly({
+    filtered_data <- financials %>%
+      filter(Year == input$yearSelect,
+             Company %in% input$companySelect)
+    
+    filtered_data <- filtered_data %>%
+      arrange(Revenue)
+    
+    # Plotly graph for Annual Revenue and Earnings by Company
+    Total_Revenue_Earnings <- plot_ly(filtered_data, x = ~Company) %>%
+      add_trace(y = ~Revenue, name = "Revenue", type = 'bar', marker = list(color = custom_palette[1])) %>%
+      add_trace(y = ~Earnings, name = "Earnings", type = 'bar', marker = list(color = custom_palette[3])) %>%
+      layout(title = list(text = "<b>Annual Revenue and Earnings by Company</b>"),
+             xaxis = list(title = "Company"),
+             yaxis = list(title = "Amount",tickprefix = "$"),
+             barmode = "group",
+             hovermode = "closest",
+             height = 300)
+    
+    Total_Revenue_Earnings
+  })
+  
+ output$graph3 <- renderPlotly({
+    filtered_cap <- reactive({
+      cap %>%
+        filter(Year == input$yearSelect,
+               Company %in% input$companySelect) %>% 
+        mutate(MarketcapTrillions = Marketcap / 1e12) 
+    })
+    plot_data <- filtered_cap()
+    
+plot_ly(data = plot_data, x = ~reorder(Company, MarketcapTrillions), y = ~MarketcapTrillions,
+        type = 'bar', color = ~Company,
+        colors = custom_palette,
+        text = ~paste("Market Cap", formatC(Company), " : $", 
+                      formatC(MarketcapTrillions, format = "f", digits = 2, big.mark = ","), "T"),
+        hoverinfo = 'text') %>%
+  layout(title = list(text = "<b>Market Cap for Selected Companies</b>"),
+         xaxis = list(title = "Company"),
+         yaxis = list(title = "Market Capitalization (Trillions)", tickprefix = "$", tickformat = ",.2fT"),
+         barmode = 'group',
+         showlegend = FALSE,
+         annotations = list())
+  })
+
+
+  
+   output$graph5 <- renderDataTable({
+    # Filter data for the selected year
+    filtered_data <- stocks_data %>%
+      filter(format(Date, "%Y") == input$yearSelect,
+             Company %in% input$companySelect)
+    
+    # Calculate summary statistics
+    custom_range_summary <- filtered_data %>%
+      group_by(Company) %>%
+      summarise(
+        HighestVolume = paste(round(max(Volume, na.rm = TRUE) / 1e6, 2), "M"),
+        HighestPrice = dollar(max(High, na.rm = TRUE)),
+        LowestPrice = dollar(min(Low, na.rm = TRUE)),
+        AvgClosingPrice = dollar(mean(Close, na.rm = TRUE))
+      )
+    
+    # Create the DataTable without scroll and adjusted for all records to be visible
+    datatable(custom_range_summary, 
+              options = list(pageLength = 5, paging = FALSE, searching = FALSE, info = FALSE, scrollX = FALSE, scrollY = FALSE),
+              class = '',
+              caption = HTML('<caption style="caption-side: top; text-align: center; color: black; font-weight: bold; font-size: 18px;"><b>Stock Summary</b></caption>')
+              ,height = 500
+              
+    ) %>%
+      formatStyle('Company', backgroundColor = 'white') %>%
+      formatStyle('HighestVolume', backgroundColor = 'white') %>%
+      formatStyle('HighestPrice', backgroundColor = 'white') %>%
+      formatStyle('LowestPrice', backgroundColor = 'white') %>%
+      formatStyle('AvgClosingPrice', backgroundColor = 'white')
+  })
+
+}
+```
+
+
+
+```{r}
+shinyApp(ui = ui, server = server)
+
+```
+
